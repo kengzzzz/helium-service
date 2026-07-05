@@ -4,6 +4,7 @@ use axum::{Router, http::StatusCode, routing::get};
 use tokio::net::TcpListener;
 
 mod allowlist;
+mod bangs;
 mod cache;
 pub mod config;
 mod error;
@@ -41,12 +42,14 @@ pub async fn run() -> Result<(), String> {
 
 pub fn app(ubo_service: UboService, extension_proxy_service: ExtensionProxyService) -> Router {
     Router::new()
-        .route("/healthz", get(healthz))
+        .route("/healthz", get(no_content))
+        .route("/connectivitycheck", get(no_content))
+        .route("/bangs.json", get(bangs::get).head(bangs::head))
         .nest("/ubo", ubo_app(ubo_service))
         .nest("/ext", extension_proxy::app(extension_proxy_service))
 }
 
-async fn healthz() -> StatusCode {
+async fn no_content() -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
@@ -58,8 +61,11 @@ mod tests {
         Router,
         body::Body,
         http::{
-            Request, StatusCode,
-            header::{ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_ENCODING, ETAG, IF_NONE_MATCH, VARY},
+            Method, Request, StatusCode,
+            header::{
+                ACCEPT_ENCODING, ACCESS_CONTROL_ALLOW_ORIGIN, CACHE_CONTROL, CONTENT_ENCODING,
+                CONTENT_LENGTH, CONTENT_TYPE, ETAG, IF_NONE_MATCH, VARY,
+            },
         },
     };
     use http_body_util::BodyExt;
@@ -321,6 +327,127 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn combined_app_serves_bangs_json_with_cache_headers() {
+        let ubo_service = test_service(
+            "http://proxy.local/ubo/",
+            "http://127.0.0.1:9/assets.json",
+            "unused",
+        );
+        let app = app(ubo_service, test_extension_proxy_service());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/bangs.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[CACHE_CONTROL],
+            "public, max-age=86400, stale-if-error=604800"
+        );
+        assert_eq!(response.headers()[ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+        assert_eq!(
+            response.headers()[CONTENT_TYPE],
+            "application/json; charset=utf-8"
+        );
+        assert!(response.headers().contains_key(ETAG));
+        let content_length = response.headers()[CONTENT_LENGTH]
+            .to_str()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        let etag = response.headers()[ETAG].to_str().unwrap().to_string();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body.len(), content_length);
+        assert!(body.starts_with(b"// Generated at "));
+
+        let not_modified = app
+            .oneshot(
+                Request::builder()
+                    .uri("/bangs.json")
+                    .header(IF_NONE_MATCH, etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+        let body = not_modified.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn combined_app_serves_bangs_head_without_body() {
+        let ubo_service = test_service(
+            "http://proxy.local/ubo/",
+            "http://127.0.0.1:9/assets.json",
+            "unused",
+        );
+        let response = app(ubo_service, test_extension_proxy_service())
+            .oneshot(
+                Request::builder()
+                    .method(Method::HEAD)
+                    .uri("/bangs.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().contains_key(CONTENT_LENGTH));
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn combined_app_rejects_unsupported_bangs_methods() {
+        let ubo_service = test_service(
+            "http://proxy.local/ubo/",
+            "http://127.0.0.1:9/assets.json",
+            "unused",
+        );
+        let response = app(ubo_service, test_extension_proxy_service())
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/bangs.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn combined_app_has_connectivitycheck() {
+        let ubo_service = test_service(
+            "http://proxy.local/ubo/",
+            "http://127.0.0.1:9/assets.json",
+            "unused",
+        );
+        let response = app(ubo_service, test_extension_proxy_service())
+            .oneshot(
+                Request::builder()
+                    .uri("/connectivitycheck")
                     .body(Body::empty())
                     .unwrap(),
             )

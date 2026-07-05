@@ -11,6 +11,7 @@ brotli = "8"
 bytes = "1"
 dotenvy = "0.15"
 fastrand = "2"
+flate2 = "1"
 futures-util = "0.3"
 hmac = "0.12"
 regex = "1"
@@ -18,6 +19,7 @@ reqwest = { version = "0.12", default-features = false, features = ["charset", "
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
+tar = "0.4"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }

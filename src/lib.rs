@@ -8,6 +8,7 @@ mod bangs;
 mod cache;
 mod compat;
 pub mod config;
+mod dict;
 mod error;
 pub mod extension_proxy;
 pub mod http;
@@ -28,6 +29,8 @@ pub async fn run() -> Result<(), String> {
 
     let extension_proxy_config = Arc::new(ExtensionProxyConfig::from_env()?);
     let extension_proxy_service = ExtensionProxyService::new(extension_proxy_config);
+    let dictionary_service = dict::DictionaryService::from_env()?;
+    dictionary_service.spawn_refresh();
 
     let bind_addr = config::bind_addr();
     let listener = TcpListener::bind(&bind_addr)
@@ -36,14 +39,30 @@ pub async fn run() -> Result<(), String> {
 
     ubo_service.preload_assets();
 
-    axum::serve(listener, app(ubo_service, extension_proxy_service))
-        .await
-        .map_err(|err| format!("server error: {err}"))
+    axum::serve(
+        listener,
+        app_with_dictionary(ubo_service, extension_proxy_service, dictionary_service),
+    )
+    .await
+    .map_err(|err| format!("server error: {err}"))
 }
 
 pub fn app(ubo_service: UboService, extension_proxy_service: ExtensionProxyService) -> Router {
+    app_with_dictionary(
+        ubo_service,
+        extension_proxy_service,
+        dict::DictionaryService::default(),
+    )
+}
+
+fn app_with_dictionary(
+    ubo_service: UboService,
+    extension_proxy_service: ExtensionProxyService,
+    dictionary_service: dict::DictionaryService,
+) -> Router {
     Router::new()
         .merge(compat::app().expect("compatibility routes must be valid"))
+        .merge(dict::app(dictionary_service))
         .route("/healthz", get(no_content))
         .route("/connectivitycheck", get(no_content))
         .route("/bangs.json", get(bangs::get).head(bangs::head))

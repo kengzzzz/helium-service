@@ -8,6 +8,7 @@ WORKDIR /src
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY assets ./assets
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
@@ -17,10 +18,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     strip /out/helium-service
 
 RUN set -eux; \
-    mkdir -p /rootfs/etc /rootfs/etc/ssl/certs /rootfs/usr/local/bin /rootfs/app /rootfs/tmp; \
+    mkdir -p /rootfs/etc /rootfs/etc/ssl/certs /rootfs/usr/local/bin /rootfs/app /rootfs/tmp/helium-dictionaries; \
     echo "helium:x:1000:1000:helium:/app:/sbin/nologin" > /rootfs/etc/passwd; \
     echo "helium:x:1000:" > /rootfs/etc/group; \
-    chmod 1777 /rootfs/tmp
+    chmod 1777 /rootfs/tmp; \
+    chown 1000:1000 /rootfs/tmp/helium-dictionaries
 
 FROM scratch
 

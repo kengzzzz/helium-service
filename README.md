@@ -8,6 +8,7 @@ A lightweight Rust backend that supports the [Helium browser](https://github.com
 - **Extension proxy** (`/ext`) — proxies Chrome Web Store extension update checks (Omaha protocol, v3/v4) and CRX downloads, with HMAC-signed URLs so the origin server can't be reached directly by clients.
 - **Helium bangs** (`/bangs.json`) — serves the generated community !bang definitions with long-lived caching and CORS.
 - **Compatibility endpoints** (`/`, `/robots.txt`, `/updates/mac`) — mirrors community service root redirect, crawler policy, and macOS update proxy behavior.
+- **Dictionary mirror** (`/dict`) — refreshes Chromium Hunspell dictionaries in the background and serves the pre-gzipped mirror like the community nginx route.
 - **Health checks** (`/healthz`, `/connectivitycheck`) — return `204 No Content` for container/orchestrator and browser connectivity probes.
 
 ## Requirements
@@ -28,6 +29,9 @@ Copy `.env.example` to `.env` and adjust as needed:
 | `UBO_ASSETS_JSON_SHA256` | No | Expected SHA-256 checksum of the custom `assets.json` (required if `UBO_ASSETS_JSON_URL` is set) |
 | `PROXY_BASE_URL` | No | Public base URL for the extension proxy; if unset, CRX proxying is disabled |
 | `HMAC_SECRET` | No | Secret (≥32 chars) used to sign proxied URLs; if unset, CRX proxying is disabled |
+| `DICT_MIRROR_DIR` | No | Writable local directory for the dictionary mirror (default `/tmp/helium-dictionaries`) |
+| `DICT_TARBALL_URL` | No | Chromium Hunspell dictionary tarball URL |
+| `DICT_REFRESH_INTERVAL_SECS` | No | Seconds between dictionary refresh attempts (default `86400`) |
 
 ## Running locally
 

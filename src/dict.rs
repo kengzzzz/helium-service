@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::{Cursor, Read, Write},
+    io::{self, Cursor, Read},
     path::{Component, Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -295,7 +295,6 @@ fn refresh_from_tarball(mirror_dir: &Path, tarball: &[u8]) -> Result<(), String>
     let result = (|| {
         fs::create_dir(&tmp).map_err(|err| err.to_string())?;
         unpack_tarball(tarball, &tmp)?;
-        gzip_files(&tmp)?;
 
         if active.exists() {
             fs::rename(&active, &old).map_err(|err| err.to_string())?;
@@ -346,9 +345,25 @@ fn unpack_tarball(tarball: &[u8], target: &Path) -> Result<(), String> {
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent).map_err(|err| err.to_string())?;
         }
-        entry.unpack(output).map_err(|err| err.to_string())?;
+        gzip_archive_entry(&mut entry, &gzip_path(&output))?;
     }
 
+    Ok(())
+}
+
+fn gzip_archive_entry<R: Read>(entry: &mut tar::Entry<'_, R>, path: &Path) -> Result<(), String> {
+    let output = fs::File::create(path)
+        .map_err(|err| format!("failed to create `{}`: {err}", path.display()))?;
+    let mut encoder = GzEncoder::new(output, Compression::best());
+    io::copy(entry, &mut encoder).map_err(|err| {
+        format!(
+            "failed to gzip archive entry into `{}`: {err}",
+            path.display()
+        )
+    })?;
+    encoder
+        .finish()
+        .map_err(|err| format!("failed to finish `{}`: {err}", path.display()))?;
     Ok(())
 }
 
@@ -362,37 +377,6 @@ fn safe_archive_path(path: &Path) -> Result<PathBuf, String> {
         }
     }
     Ok(output)
-}
-
-fn gzip_files(directory: &Path) -> Result<(), String> {
-    for entry in fs::read_dir(directory).map_err(|err| err.to_string())? {
-        let entry = entry.map_err(|err| err.to_string())?;
-        let path = entry.path();
-        let metadata = entry.metadata().map_err(|err| err.to_string())?;
-        if metadata.is_dir() {
-            gzip_files(&path)?;
-        } else if metadata.is_file()
-            && path.extension().and_then(|value| value.to_str()) != Some("gz")
-        {
-            gzip_file(&path)?;
-        }
-    }
-    Ok(())
-}
-
-fn gzip_file(path: &Path) -> Result<(), String> {
-    let mut input = fs::File::open(path).map_err(|err| err.to_string())?;
-    let gzip_path = gzip_path(path);
-    let output = fs::File::create(&gzip_path).map_err(|err| err.to_string())?;
-    let mut encoder = GzEncoder::new(output, Compression::best());
-    let mut buffer = Vec::new();
-    input
-        .read_to_end(&mut buffer)
-        .map_err(|err| err.to_string())?;
-    encoder.write_all(&buffer).map_err(|err| err.to_string())?;
-    encoder.finish().map_err(|err| err.to_string())?;
-    fs::remove_file(path).map_err(|err| err.to_string())?;
-    Ok(())
 }
 
 #[cfg(test)]

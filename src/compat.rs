@@ -150,7 +150,7 @@ async fn proxy_response(
         StatusCode::from_u16(response.status().as_u16()).map_err(ServiceError::internal)?;
     let source_headers = response.headers().clone();
     let body = if include_body {
-        Body::from(response.bytes().await.map_err(ServiceError::internal)?)
+        Body::from_stream(response.bytes_stream())
     } else {
         Body::empty()
     };

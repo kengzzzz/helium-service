@@ -18,7 +18,8 @@ use axum::{
     routing::get,
 };
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-use tokio::{task, time};
+use tokio::{fs as tokio_fs, task, time};
+use tokio_util::io::ReaderStream;
 use url::Url;
 use uuid::Uuid;
 
@@ -140,10 +141,7 @@ async fn handle(
     let active_dir = service.active_dir();
     let include_body = method == Method::GET;
 
-    let response =
-        task::spawn_blocking(move || dictionary_response(&active_dir, &relative, include_body))
-            .await
-            .map_err(ServiceError::internal)??;
+    let response = dictionary_response(&active_dir, &relative, include_body).await?;
     Ok(response)
 }
 
@@ -170,27 +168,41 @@ fn safe_relative_path(path: &str) -> Result<PathBuf, ServiceError> {
     Ok(output)
 }
 
-fn dictionary_response(
+async fn dictionary_response(
     active_dir: &Path,
     relative: &Path,
     include_body: bool,
 ) -> Result<Response, ServiceError> {
     let directory = active_dir.join(relative);
-    if directory.is_dir() {
-        return directory_listing(active_dir, relative, include_body);
+    if tokio_fs::metadata(&directory)
+        .await
+        .is_ok_and(|metadata| metadata.is_dir())
+    {
+        let active_dir = active_dir.to_path_buf();
+        let relative = relative.to_path_buf();
+        return task::spawn_blocking(move || {
+            directory_listing(&active_dir, &relative, include_body)
+        })
+        .await
+        .map_err(ServiceError::internal)?;
     }
 
     let file = active_dir.join(gzip_path(relative));
-    if !file.is_file() {
-        return Err(ServiceError::with_status(
-            StatusCode::NOT_FOUND,
-            "Not Found",
-        ));
-    }
+    let metadata = match tokio_fs::metadata(&file).await {
+        Ok(metadata) if metadata.is_file() => metadata,
+        _ => {
+            return Err(ServiceError::with_status(
+                StatusCode::NOT_FOUND,
+                "Not Found",
+            ));
+        }
+    };
 
-    let bytes = fs::read(file).map_err(ServiceError::internal)?;
     let body = if include_body {
-        Body::from(bytes.clone())
+        let file = tokio_fs::File::open(file)
+            .await
+            .map_err(ServiceError::internal)?;
+        Body::from_stream(ReaderStream::new(file))
     } else {
         Body::empty()
     };
@@ -203,7 +215,7 @@ fn dictionary_response(
     headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
     headers.insert(
         CONTENT_LENGTH,
-        HeaderValue::from_str(&bytes.len().to_string()).map_err(ServiceError::internal)?,
+        HeaderValue::from_str(&metadata.len().to_string()).map_err(ServiceError::internal)?,
     );
     Ok(response)
 }

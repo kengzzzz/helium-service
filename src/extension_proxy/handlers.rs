@@ -97,9 +97,8 @@ pub(crate) async fn proxy_response(response: reqwest::Response) -> Result<Respon
     let status =
         StatusCode::from_u16(response.status().as_u16()).map_err(ServiceError::internal)?;
     let source_headers = response.headers().clone();
-    let body = response.bytes().await.map_err(ServiceError::internal)?;
 
-    let mut response = Response::new(Body::from(body));
+    let mut response = Response::new(Body::from_stream(response.bytes_stream()));
     *response.status_mut() = status;
     headers::copy_allowed_response_headers(response.headers_mut(), &source_headers)?;
     Ok(response)

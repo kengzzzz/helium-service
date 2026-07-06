@@ -5,7 +5,7 @@ A lightweight Rust backend that supports the [Helium browser](https://github.com
 ## What it does
 
 - **uBO asset proxy** (`/ubo`) — serves uBlock Origin's `assets.json` manifest and filter lists, rewriting upstream URLs to point back through this service, with HTTP caching (ETag/If-None-Match) and Brotli compression.
-- **Extension proxy** (`/ext`) — proxies Chrome Web Store extension update checks (Omaha protocol, v3/v4) and CRX downloads, with HMAC-signed URLs so the origin server can't be reached directly by clients.
+- **Extension proxy** (`/ext`, `/com`) — proxies Chrome Web Store extension update checks (Omaha protocol, v3/v4), Chrome component update checks, and CRX downloads, with HMAC-signed URLs so the origin server can't be reached directly by clients.
 - **Helium bangs** (`/bangs.json`) — serves the generated community !bang definitions with long-lived caching and CORS.
 - **Compatibility endpoints** (`/`, `/robots.txt`, `/updates/mac`) — mirrors community service root redirect, crawler policy, and macOS update proxy behavior.
 - **Dictionary mirror** (`/dict`) — refreshes Chromium Hunspell dictionaries in the background and serves the pre-gzipped mirror like the community nginx route.

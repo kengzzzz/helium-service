@@ -66,6 +66,9 @@ fn app_with_dictionary(
         .route("/healthz", get(no_content))
         .route("/connectivitycheck", get(no_content))
         .route("/bangs.json", get(bangs::get).head(bangs::head))
+        .merge(extension_proxy::chrome_components_app(
+            extension_proxy_service.clone(),
+        ))
         .nest("/ubo", ubo_app(ubo_service))
         .nest("/ext", extension_proxy::app(extension_proxy_service))
 }
@@ -339,6 +342,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(unprefixed.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn combined_app_serves_chrome_components_at_top_level() {
+        let ubo_service = test_service(
+            "http://proxy.local/ubo/",
+            "http://127.0.0.1:9/assets.json",
+            "unused",
+        );
+        let response = app(ubo_service, test_extension_proxy_service())
+            .oneshot(Request::builder().uri("/com").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"error 400: malformed request");
     }
 
     #[tokio::test]

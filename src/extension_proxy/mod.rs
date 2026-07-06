@@ -48,6 +48,12 @@ pub fn app(service: ExtensionProxyService) -> Router {
         .with_state(service)
 }
 
+pub fn chrome_components_app(service: ExtensionProxyService) -> Router {
+    Router::new()
+        .route("/com", any(handlers::handle))
+        .with_state(service)
+}
+
 fn status_error(status: axum::http::StatusCode, text: impl Into<String>) -> ServiceError {
     let text = text.into();
     ServiceError::with_status(status, format!("error {}: {text}", status.as_u16()))

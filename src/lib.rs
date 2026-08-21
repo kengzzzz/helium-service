@@ -61,7 +61,7 @@ fn app_with_dictionary(
     dictionary_service: dict::DictionaryService,
 ) -> Router {
     Router::new()
-        .merge(compat::app().expect("compatibility routes must be valid"))
+        .merge(compat::app())
         .merge(dict::app(dictionary_service))
         .route("/healthz", get(no_content))
         .route("/connectivitycheck", get(no_content))
@@ -79,22 +79,18 @@ async fn no_content() -> StatusCode {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        net::SocketAddr,
-        sync::{Arc, Mutex},
-    };
+    use std::{net::SocketAddr, sync::Arc};
 
     use axum::{
         Router,
         body::Body,
         http::{
-            Method, Request, StatusCode, Uri,
+            Method, Request, StatusCode,
             header::{
                 ACCEPT_ENCODING, ACCESS_CONTROL_ALLOW_ORIGIN, CACHE_CONTROL, CONTENT_ENCODING,
                 CONTENT_LENGTH, CONTENT_TYPE, ETAG, IF_NONE_MATCH, LOCATION, VARY,
             },
         },
-        response::Response,
     };
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
@@ -572,10 +568,7 @@ mod tests {
             "http://127.0.0.1:9/assets.json",
             "unused",
         );
-        let app = app(ubo_service, test_extension_proxy_service());
-
-        let robots = app
-            .clone()
+        let robots = app(ubo_service, test_extension_proxy_service())
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -586,29 +579,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(robots.status(), StatusCode::METHOD_NOT_ALLOWED);
-
-        let updates = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/updates/mac")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(updates.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[tokio::test]
-    async fn mac_updates_proxy_preserves_path_query_and_response_headers() {
-        let (source, requests) = recording_fixture_server("appcast").await;
-        let app =
-            crate::compat::app_with_mac_updates_base(Url::parse(&format!("{source}/mac")).unwrap())
-                .unwrap();
-
-        let base_response = app
-            .clone()
+    async fn combined_app_does_not_serve_obsolete_mac_updates_route() {
+        let ubo_service = test_service(
+            "http://proxy.local/ubo/",
+            "http://127.0.0.1:9/assets.json",
+            "unused",
+        );
+        let updates = app(ubo_service, test_extension_proxy_service())
             .oneshot(
                 Request::builder()
                     .uri("/updates/mac")
@@ -617,45 +597,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(base_response.status(), StatusCode::OK);
-
-        let slash_response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/updates/mac/")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(slash_response.status(), StatusCode::OK);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/updates/mac/stable/appcast.xml?channel=stable")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[CONTENT_TYPE], "application/xml");
-        assert_eq!(response.headers()[ETAG], "\"fixture\"");
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&body[..], b"appcast");
-
-        let requests = requests.lock().unwrap();
-        assert_eq!(
-            requests.as_slice(),
-            [
-                "GET /mac",
-                "GET /mac/",
-                "GET /mac/stable/appcast.xml?channel=stable"
-            ]
-        );
+        assert_eq!(updates.status(), StatusCode::NOT_FOUND);
     }
 
     fn test_service(base_url: &str, assets_url: &str, checksum: &str) -> UboService {
@@ -688,43 +630,6 @@ mod tests {
             axum::serve(listener, route).await.unwrap();
         });
         format!("http://{addr}")
-    }
-
-    async fn recording_fixture_server(body: &str) -> (String, Arc<Mutex<Vec<String>>>) {
-        let body = body.to_string();
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let route_requests = Arc::clone(&requests);
-        let route = Router::new().fallback(move |method: Method, uri: Uri| {
-            let body = body.clone();
-            let route_requests = Arc::clone(&route_requests);
-            async move {
-                route_requests
-                    .lock()
-                    .unwrap()
-                    .push(format!("{method} {uri}"));
-
-                let mut response = if method == Method::HEAD {
-                    Response::new(Body::empty())
-                } else {
-                    Response::new(Body::from(body))
-                };
-                response
-                    .headers_mut()
-                    .insert(CONTENT_TYPE, "application/xml".parse().unwrap());
-                response
-                    .headers_mut()
-                    .insert(ETAG, "\"fixture\"".parse().unwrap());
-                response
-            }
-        });
-        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-            .await
-            .unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, route).await.unwrap();
-        });
-        (format!("http://{addr}"), requests)
     }
 
     fn brotli_decompress(body: &[u8]) -> String {

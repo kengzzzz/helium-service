@@ -4,10 +4,10 @@ use url::Url;
 
 use crate::error::ServiceError;
 
-const VERSION_HELIUM: &str = "1.71.0";
-const VERSION_VANILLA: &str = "1.71.0";
-const CSUM_HELIUM: &str = "38252894162bf0cc9ed682669760922c17af67d9a1bd27b082997d732895afd0";
-const CSUM_VANILLA: &str = "5107ce702293e110ce6cc6467a51e689e919eed4382650c354c1d66db2aacc3d";
+const VERSION_HELIUM: &str = "1.73.0";
+const VERSION_VANILLA: &str = "1.73.0";
+const CSUM_HELIUM: &str = "8223523350062ecc8406265fbf2dfbf22aede1b5e3d1e1f83c311cec4db36076";
+const CSUM_VANILLA: &str = "fff077d6a1f5522170fa343008e18a4e41228fae8dd5abe5796191f7f3400b17";
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8000";
 const DEFAULT_HEALTHCHECK_URL: &str = "http://127.0.0.1:8000/healthz";
 
@@ -134,5 +134,28 @@ mod tests {
         };
 
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn built_in_assets_match_current_ubo_release() {
+        for (use_helium_assets, repo, checksum) in [
+            (true, "imputnet/uBlock", CSUM_HELIUM),
+            (false, "gorhill/uBlock", CSUM_VANILLA),
+        ] {
+            let config = Config {
+                base_url: Url::parse("http://localhost:8000/").unwrap(),
+                use_helium_assets,
+                custom_assets_url: None,
+                custom_assets_checksum: None,
+            };
+
+            assert_eq!(
+                config.assets_url().unwrap().as_str(),
+                format!(
+                    "https://raw.githubusercontent.com/{repo}/refs/tags/1.73.0/assets/assets.json"
+                )
+            );
+            assert_eq!(config.file_checksum().unwrap(), checksum);
+        }
     }
 }

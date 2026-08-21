@@ -25,7 +25,7 @@ use uuid::Uuid;
 
 use crate::error::ServiceError;
 
-const DEFAULT_TARBALL_URL: &str = "https://chromium.googlesource.com/chromium/deps/hunspell_dictionaries/+archive/refs/heads/main.tar.gz";
+const DEFAULT_TARBALL_URL: &str = "https://chromium.googlesource.com/chromium/deps/hunspell_dictionaries/+archive/cccf64a8acc951afe3f47fee023908e55699bc58.tar.gz";
 const DEFAULT_MIRROR_DIR: &str = "/tmp/helium-dictionaries";
 const DEFAULT_REFRESH_INTERVAL_SECS: u64 = 86_400;
 
@@ -409,6 +409,15 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    #[test]
+    fn default_tarball_is_pinned_to_browser_compatible_revision() {
+        assert_eq!(
+            DEFAULT_TARBALL_URL,
+            "https://chromium.googlesource.com/chromium/deps/hunspell_dictionaries/+archive/cccf64a8acc951afe3f47fee023908e55699bc58.tar.gz"
+        );
+        assert!(!DEFAULT_TARBALL_URL.contains("refs/heads"));
+    }
 
     #[tokio::test]
     async fn refresh_serves_extensionless_gzip_file_and_head() {

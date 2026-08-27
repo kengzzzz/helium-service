@@ -7,10 +7,12 @@ use axum::{
 use bytes::Bytes;
 
 use crate::error::ServiceError;
+use crate::upstream::{checked_response, read_limited};
 
 use super::{ExtensionProxyService, bad_request, headers, is_valid_app_id, omaha, status_error};
 
 const BODY_LIMIT: usize = 1024 * 1024;
+const CWS_SNIPPET_LIMIT: usize = 2 * 1024 * 1024;
 const CHROME_WEBSTORE_SNIPPET: &str =
     "https://chromewebstore.googleapis.com/v2/items/{}:fetchItemSnippet";
 
@@ -67,17 +69,20 @@ async fn handle_snippet_proxy(
     }
 
     let url = CHROME_WEBSTORE_SNIPPET.replace("{}", &extension_id);
-    let response = service
-        .client
-        .post(url)
-        .header("accept", "application/x-protobuf")
-        .header("content-type", "application/x-protobuf")
-        .header("x-http-method-override", "GET")
-        .send()
-        .await
-        .map_err(ServiceError::internal)?;
+    let response = checked_response(
+        service
+            .client
+            .post(url)
+            .header("accept", "application/x-protobuf")
+            .header("content-type", "application/x-protobuf")
+            .header("x-http-method-override", "GET")
+            .send()
+            .await,
+        "cws_snippet",
+    )
+    .await?;
 
-    proxy_response(response).await
+    buffered_proxy_response(response, CWS_SNIPPET_LIMIT, "cws_snippet").await
 }
 
 pub(crate) async fn proxy_get(
@@ -85,12 +90,31 @@ pub(crate) async fn proxy_get(
     url: &str,
     request_headers: &HeaderMap,
 ) -> Result<Response, ServiceError> {
-    let builder = service.client.get(url);
+    let builder = service.download_client.get(url);
     let response = headers::copy_allowed_request_headers(builder, request_headers)
         .send()
         .await
-        .map_err(ServiceError::internal)?;
+        .map_err(|err| ServiceError::upstream("crx_download", &err))?;
+    if response.status().is_server_error() {
+        return Err(ServiceError::bad_gateway("crx_download", "status"));
+    }
     proxy_response(response).await
+}
+
+async fn buffered_proxy_response(
+    response: reqwest::Response,
+    limit: usize,
+    category: &'static str,
+) -> Result<Response, ServiceError> {
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).map_err(ServiceError::internal)?;
+    let source_headers = response.headers().clone();
+    let body = read_limited(response, limit, category).await?;
+
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    headers::copy_allowed_response_headers(response.headers_mut(), &source_headers)?;
+    Ok(response)
 }
 
 pub(crate) async fn proxy_response(response: reqwest::Response) -> Result<Response, ServiceError> {

@@ -1,6 +1,9 @@
 use serde_json::{Value, json};
 
-use crate::error::ServiceError;
+use crate::{
+    error::ServiceError,
+    upstream::{checked_response, read_limited},
+};
 
 use super::{
     App, ExtensionProxyService, MAX_EXTENSIONS_PER_REQUEST, OMAHA_JSON_PREFIX, ProtocolVersion,
@@ -8,6 +11,7 @@ use super::{
 };
 
 const UPDATE_SERVICE: &str = "https://clients2.google.com/service/update2/json";
+const OMAHA_RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
 
 pub(crate) async fn request(
     service: &ExtensionProxyService,
@@ -32,35 +36,36 @@ pub(crate) async fn request(
         .await?;
     let body = craft_request(service, apps, protocol, &browser_version).await?;
 
-    let response = service
-        .client
-        .post(UPDATE_SERVICE)
-        .header("user-agent", user_agent)
-        .header("content-type", "application/json")
-        .header("priority", "u=4, i")
-        .header("sec-fetch-dest", "empty")
-        .header("sec-fetch-mode", "no-cors")
-        .header("sec-fetch-site", "none")
-        .header("x-goog-update-appid", app_ids)
-        .header(
-            "x-goog-update-interactivity",
-            if service_id == ServiceId::ChromeComponents {
-                "fg"
-            } else {
-                "bg"
-            },
-        )
-        .header("x-goog-update-updater", format!("chrome-{browser_version}"))
-        .body(serde_json::to_string(&body).map_err(ServiceError::internal)?)
-        .send()
-        .await
-        .map_err(ServiceError::internal)?;
+    let response = checked_response(
+        service
+            .client
+            .post(UPDATE_SERVICE)
+            .header("user-agent", user_agent)
+            .header("content-type", "application/json")
+            .header("priority", "u=4, i")
+            .header("sec-fetch-dest", "empty")
+            .header("sec-fetch-mode", "no-cors")
+            .header("sec-fetch-site", "none")
+            .header("x-goog-update-appid", app_ids)
+            .header(
+                "x-goog-update-interactivity",
+                if service_id == ServiceId::ChromeComponents {
+                    "fg"
+                } else {
+                    "bg"
+                },
+            )
+            .header("x-goog-update-updater", format!("chrome-{browser_version}"))
+            .body(serde_json::to_string(&body).map_err(ServiceError::internal)?)
+            .send()
+            .await,
+        "omaha",
+    )
+    .await?;
 
-    if !response.status().is_success() {
-        return Err(ServiceError::internal("response is not ok"));
-    }
-
-    let text = response.text().await.map_err(ServiceError::internal)?;
+    let text = read_limited(response, OMAHA_RESPONSE_LIMIT, "omaha").await?;
+    let text = std::str::from_utf8(&text)
+        .map_err(|_| ServiceError::bad_gateway("omaha", "invalid_text"))?;
     if !text.starts_with(OMAHA_JSON_PREFIX) {
         return Err(ServiceError::internal("invalid response"));
     }

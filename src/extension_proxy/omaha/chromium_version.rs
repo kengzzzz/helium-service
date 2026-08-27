@@ -6,9 +6,13 @@ use std::{
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::error::ServiceError;
+use crate::{
+    error::ServiceError,
+    upstream::{checked_response, read_limited},
+};
 
 const UPDATE_INFO_URL: &str = "https://chromiumdash.appspot.com/fetch_releases?channel=Stable&platform=Windows&num=5&offset=0";
+const VERSION_RESPONSE_LIMIT: usize = 1024 * 1024;
 
 #[derive(Clone, Default)]
 pub(crate) struct ChromiumVersionCache {
@@ -33,15 +37,10 @@ impl ChromiumVersionCache {
                 .is_none_or(|cached_at| cached_at + Duration::from_secs(60 * 60) < Instant::now())
         };
 
-        if should_refresh {
-            match fetch_versions(client).await {
-                Ok(versions) => {
-                    let mut inner = self.inner.lock().await;
-                    inner.cached_at = Some(Instant::now());
-                    inner.versions = versions;
-                }
-                Err(err) => eprintln!("Error occurred fetching Chromium versions: {err:?}"),
-            }
+        if should_refresh && let Ok(versions) = fetch_versions(client).await {
+            let mut inner = self.inner.lock().await;
+            inner.cached_at = Some(Instant::now());
+            inner.versions = versions;
         }
 
         let inner = self.inner.lock().await;
@@ -55,16 +54,13 @@ impl ChromiumVersionCache {
 }
 
 async fn fetch_versions(client: &reqwest::Client) -> Result<Vec<String>, ServiceError> {
-    let response = client
-        .get(UPDATE_INFO_URL)
-        .send()
-        .await
-        .map_err(ServiceError::internal)?;
-    if !response.status().is_success() {
-        return Err(ServiceError::internal("response is not ok"));
-    }
-    let text = response.text().await.map_err(ServiceError::internal)?;
-    let data: Value = serde_json::from_str(&text).map_err(ServiceError::internal)?;
+    let response = checked_response(
+        client.get(UPDATE_INFO_URL).send().await,
+        "chromium_versions",
+    )
+    .await?;
+    let text = read_limited(response, VERSION_RESPONSE_LIMIT, "chromium_versions").await?;
+    let data: Value = serde_json::from_slice(&text).map_err(ServiceError::internal)?;
     let array = data
         .as_array()
         .ok_or_else(|| ServiceError::internal("invalid response"))?;

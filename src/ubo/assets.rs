@@ -11,7 +11,10 @@ use crate::{
         tags::{sha256_hex, sha256_u32_words},
         urls::{filename_for_source, is_valid_http_url, join_url, posix_dirname},
     },
+    upstream::{checked_response, read_limited},
 };
+
+const ASSETS_JSON_LIMIT: usize = 4 * 1024 * 1024;
 
 pub(super) async fn handle_assets(service: &UboService) -> Result<CachedItem, ServiceError> {
     let service = service.clone();
@@ -30,19 +33,18 @@ pub(super) async fn handle_assets(service: &UboService) -> Result<CachedItem, Se
 
 impl UboService {
     async fn prepare_asset_string(&self) -> Result<String, ServiceError> {
-        let asset_list = self
-            .client
-            .get(self.config.assets_url()?)
-            .send()
-            .await
-            .map_err(ServiceError::internal)?
-            .text()
-            .await
-            .map_err(ServiceError::internal)?;
+        let response = checked_response(
+            self.client.get(self.config.assets_url()?).send().await,
+            "ubo_assets",
+        )
+        .await?;
+        let asset_list = read_limited(response, ASSETS_JSON_LIMIT, "ubo_assets").await?;
+        let asset_list = String::from_utf8(asset_list.to_vec())
+            .map_err(|_| ServiceError::bad_gateway("ubo_assets", "invalid_text"))?;
 
         let checksum = sha256_hex(asset_list.as_bytes());
         if checksum != self.config.file_checksum()? {
-            eprintln!("[!] assets.json checksum does not match");
+            crate::observability::checksum_drift("ubo_assets");
             return Err(ServiceError::bad_request(format!(
                 "checksum does not match: {checksum}"
             )));

@@ -1,6 +1,11 @@
 use futures_util::{StreamExt, stream::FuturesUnordered};
 
-use crate::error::ServiceError;
+use crate::{
+    error::ServiceError,
+    upstream::{checked_response, read_limited},
+};
+
+const FILTER_LIST_LIMIT: usize = 32 * 1024 * 1024;
 
 pub(super) async fn shotgun_fetch(
     client: &reqwest::Client,
@@ -12,19 +17,10 @@ pub(super) async fn shotgun_fetch(
         .map(|url| {
             let client = client.clone();
             async move {
-                let response = client
-                    .get(url)
-                    .send()
-                    .await
-                    .map_err(ServiceError::internal)?;
-                if response.status() == reqwest::StatusCode::OK {
-                    response.text().await.map_err(ServiceError::internal)
-                } else {
-                    Err(ServiceError::internal(format!(
-                        "unexpected status: {}",
-                        response.status()
-                    )))
-                }
+                let response = checked_response(client.get(url).send().await, "ubo_filter").await?;
+                let body = read_limited(response, FILTER_LIST_LIMIT, "ubo_filter").await?;
+                String::from_utf8(body.to_vec())
+                    .map_err(|_| ServiceError::bad_gateway("ubo_filter", "invalid_text"))
             }
         })
         .collect::<FuturesUnordered<_>>();

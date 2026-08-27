@@ -21,6 +21,8 @@ async fn main() {
 async fn healthcheck() -> Result<(), String> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .read_timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|err| err.to_string())?;
 

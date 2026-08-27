@@ -22,6 +22,12 @@ pub(super) async fn handle_filterlist(
         path = stripped.to_string();
     }
 
+    let urls = service
+        .allowlist
+        .get_urls_for_path(&path)
+        .await
+        .ok_or_else(|| ServiceError::with_status(StatusCode::NOT_FOUND, "Not Found"))?;
+
     let service = service.clone();
     let cache = service.cache.clone();
     let source_path = path.clone();
@@ -32,19 +38,17 @@ pub(super) async fn handle_filterlist(
                 content_type: "text/plain; charset=utf-8".to_string(),
                 expiry: Some(Duration::from_secs(3600)),
             },
-            move || async move { service.prepare_filterlist(source_path).await },
+            move || async move { service.prepare_filterlist(source_path, urls).await },
         )
         .await
 }
 
 impl UboService {
-    async fn prepare_filterlist(&self, path: String) -> Result<String, ServiceError> {
-        let urls = self
-            .allowlist
-            .get_urls_for_path(&path)
-            .await
-            .ok_or_else(|| ServiceError::with_status(StatusCode::NOT_FOUND, "Not Found"))?;
-
+    async fn prepare_filterlist(
+        &self,
+        path: String,
+        urls: Vec<String>,
+    ) -> Result<String, ServiceError> {
         let text = shotgun_fetch(&self.client, &urls).await?;
         let parent_id = path.split('/').next().unwrap_or_default().to_string();
         let mut to_allowlist = HashMap::new();

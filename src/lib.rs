@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::{Router, http::StatusCode, routing::get};
+use axum::{Router, http::StatusCode, middleware, routing::get};
 use tokio::net::TcpListener;
 
 mod allowlist;
@@ -9,10 +9,13 @@ mod cache;
 mod compat;
 pub mod config;
 mod dict;
+pub mod drift;
 mod error;
 pub mod extension_proxy;
 pub mod http;
+mod observability;
 pub mod ubo;
+mod upstream;
 
 pub use config::Config;
 pub use extension_proxy::{ExtensionProxyConfig, ExtensionProxyService};
@@ -30,7 +33,7 @@ pub async fn run() -> Result<(), String> {
     let extension_proxy_config = Arc::new(ExtensionProxyConfig::from_env()?);
     let extension_proxy_service = ExtensionProxyService::new(extension_proxy_config);
     let dictionary_service = dict::DictionaryService::from_env()?;
-    dictionary_service.spawn_refresh();
+    dictionary_service.spawn_startup_refresh();
 
     let bind_addr = config::bind_addr();
     let listener = TcpListener::bind(&bind_addr)
@@ -60,10 +63,26 @@ fn app_with_dictionary(
     extension_proxy_service: ExtensionProxyService,
     dictionary_service: dict::DictionaryService,
 ) -> Router {
+    let readiness_ubo = ubo_service.clone();
+    let readiness_dictionary = dictionary_service.clone();
     Router::new()
         .merge(compat::app())
         .merge(dict::app(dictionary_service))
         .route("/healthz", get(no_content))
+        .route(
+            "/readyz",
+            get(move || {
+                let ubo = readiness_ubo.clone();
+                let dictionary = readiness_dictionary.clone();
+                async move {
+                    if ubo.is_ready() && dictionary.is_ready() {
+                        StatusCode::NO_CONTENT
+                    } else {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    }
+                }
+            }),
+        )
         .route("/connectivitycheck", get(no_content))
         .route("/bangs.json", get(bangs::get).head(bangs::head))
         .merge(extension_proxy::chrome_components_app(
@@ -71,6 +90,7 @@ fn app_with_dictionary(
         ))
         .nest("/ubo", ubo_app(ubo_service))
         .nest("/ext", extension_proxy::app(extension_proxy_service))
+        .layer(middleware::from_fn(observability::log_request))
 }
 
 async fn no_content() -> StatusCode {
@@ -79,7 +99,13 @@ async fn no_content() -> StatusCode {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddr, sync::Arc};
+    use std::{
+        net::SocketAddr,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use axum::{
         Router,
@@ -99,7 +125,8 @@ mod tests {
     use url::Url;
 
     use crate::{
-        Config, ExtensionProxyConfig, ExtensionProxyService, UboService, app,
+        Config, ExtensionProxyConfig, ExtensionProxyService, UboService, app, app_with_dictionary,
+        dict::DictionaryService,
         ubo::{
             assets::to_pretty_json_4,
             tags::sha256_hex,
@@ -244,6 +271,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_filter_paths_never_enter_the_cache() {
+        let service = test_service(
+            "http://proxy.local/ubo/",
+            "http://127.0.0.1:9/assets.json",
+            "unused",
+        );
+
+        for index in 0..10_000 {
+            let error = service
+                .handle_filterlist(format!("/invalid/{index}"))
+                .await
+                .unwrap_err();
+            assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        }
+
+        let stats = service.cache_stats().await;
+        assert_eq!(stats.count, 0);
+        assert_eq!(stats.size, 0);
+    }
+
+    #[tokio::test]
+    async fn repeated_upstream_failures_remain_bad_gateway() {
+        let (source, requests) =
+            fixture_status_server(StatusCode::INTERNAL_SERVER_ERROR, "failure").await;
+        let source_url = format!("{source}/filters/easylist.txt");
+        let manifest = json!({
+            "assets.json": {
+                "content": "internal",
+                "contentURL": "assets/assets.json"
+            },
+            "easylist": {
+                "content": "filters",
+                "contentURL": source_url
+            }
+        });
+        let manifest_string = to_pretty_json_4(&manifest).unwrap();
+        let checksum = sha256_hex(manifest_string.as_bytes());
+        let assets_source = fixture_server(&manifest_string).await;
+        let service = test_service(
+            "http://proxy.local/ubo/",
+            &format!("{assets_source}/assets.json"),
+            &checksum,
+        );
+        let assets = service.handle_assets().await.unwrap();
+        let manifest: Value = serde_json::from_str(&brotli_decompress(&assets.body)).unwrap();
+        let path = Url::parse(manifest["easylist"]["contentURL"].as_str().unwrap())
+            .unwrap()
+            .path()
+            .strip_prefix("/ubo/")
+            .unwrap()
+            .to_string();
+
+        for _ in 0..2 {
+            let error = service.handle_filterlist(path.clone()).await.unwrap_err();
+            assert_eq!(error.status(), StatusCode::BAD_GATEWAY);
+        }
+        assert_eq!(requests.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
     async fn missing_brotli_header_is_406() {
         let service = test_service(
             "http://proxy.local/ubo/",
@@ -375,6 +462,67 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn readiness_requires_ubo_and_dictionary_assets() {
+        let manifest = json!({
+            "assets.json": {
+                "content": "internal",
+                "contentURL": "assets/assets.json"
+            }
+        });
+        let manifest_string = to_pretty_json_4(&manifest).unwrap();
+        let checksum = sha256_hex(manifest_string.as_bytes());
+        let assets_source = fixture_server(&manifest_string).await;
+        let ubo = test_service(
+            "http://proxy.local/ubo/",
+            &format!("{assets_source}/assets.json"),
+            &checksum,
+        );
+        let dictionary = DictionaryService::for_test(false);
+        let router = app_with_dictionary(
+            ubo.clone(),
+            test_extension_proxy_service(),
+            dictionary.clone(),
+        );
+
+        let fresh = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fresh.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        ubo.handle_assets().await.unwrap();
+        let missing_dictionary = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing_dictionary.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        dictionary.set_ready_for_test(true);
+        let ready = router
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ready.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
@@ -617,10 +765,22 @@ mod tests {
     }
 
     async fn fixture_server(body: &str) -> String {
+        fixture_status_server(StatusCode::OK, body).await.0
+    }
+
+    async fn fixture_status_server(status: StatusCode, body: &str) -> (String, Arc<AtomicUsize>) {
         let body = body.to_string();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let route_requests = Arc::clone(&requests);
         let route = Router::new().fallback(move || {
             let body = body.clone();
-            async move { body }
+            let requests = Arc::clone(&route_requests);
+            async move {
+                requests.fetch_add(1, Ordering::Relaxed);
+                let mut response = axum::response::Response::new(Body::from(body));
+                *response.status_mut() = status;
+                response
+            }
         });
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
@@ -629,7 +789,7 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, route).await.unwrap();
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), requests)
     }
 
     fn brotli_decompress(body: &[u8]) -> String {

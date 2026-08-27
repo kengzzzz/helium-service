@@ -4,12 +4,14 @@ use url::Url;
 
 use crate::error::ServiceError;
 
-const VERSION_HELIUM: &str = "1.73.0";
-const VERSION_VANILLA: &str = "1.73.0";
-const CSUM_HELIUM: &str = "8223523350062ecc8406265fbf2dfbf22aede1b5e3d1e1f83c311cec4db36076";
-const CSUM_VANILLA: &str = "fff077d6a1f5522170fa343008e18a4e41228fae8dd5abe5796191f7f3400b17";
+pub(crate) const VERSION_HELIUM: &str = "1.74.0";
+pub(crate) const VERSION_VANILLA: &str = "1.73.0";
+pub(crate) const CSUM_HELIUM: &str =
+    "94d3de3dfccfe953be535961e4108773c5f5797291d69de07f8f1f831a361656";
+pub(crate) const CSUM_VANILLA: &str =
+    "fff077d6a1f5522170fa343008e18a4e41228fae8dd5abe5796191f7f3400b17";
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8000";
-const DEFAULT_HEALTHCHECK_URL: &str = "http://127.0.0.1:8000/healthz";
+const DEFAULT_HEALTHCHECK_URL: &str = "http://127.0.0.1:8000/readyz";
 
 #[derive(Clone)]
 pub struct Config {
@@ -138,9 +140,9 @@ mod tests {
 
     #[test]
     fn built_in_assets_match_current_ubo_release() {
-        for (use_helium_assets, repo, checksum) in [
-            (true, "imputnet/uBlock", CSUM_HELIUM),
-            (false, "gorhill/uBlock", CSUM_VANILLA),
+        for (use_helium_assets, repo, version, checksum) in [
+            (true, "imputnet/uBlock", VERSION_HELIUM, CSUM_HELIUM),
+            (false, "gorhill/uBlock", VERSION_VANILLA, CSUM_VANILLA),
         ] {
             let config = Config {
                 base_url: Url::parse("http://localhost:8000/").unwrap(),
@@ -152,7 +154,7 @@ mod tests {
             assert_eq!(
                 config.assets_url().unwrap().as_str(),
                 format!(
-                    "https://raw.githubusercontent.com/{repo}/refs/tags/1.73.0/assets/assets.json"
+                    "https://raw.githubusercontent.com/{repo}/refs/tags/{version}/assets/assets.json"
                 )
             );
             assert_eq!(config.file_checksum().unwrap(), checksum);

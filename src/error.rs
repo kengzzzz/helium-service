@@ -7,6 +7,7 @@ use axum::{
 #[derive(Debug, Clone)]
 pub(crate) enum ServiceError {
     Status { status: StatusCode, text: String },
+    Upstream { status: StatusCode },
     Internal,
 }
 
@@ -25,6 +26,33 @@ impl ServiceError {
     pub(crate) fn internal(_: impl std::fmt::Display) -> Self {
         Self::Internal
     }
+
+    pub(crate) fn upstream(category: &'static str, error: &reqwest::Error) -> Self {
+        let (status, kind) = if error.is_timeout() {
+            (StatusCode::GATEWAY_TIMEOUT, "timeout")
+        } else if error.is_connect() {
+            (StatusCode::BAD_GATEWAY, "connect")
+        } else {
+            (StatusCode::BAD_GATEWAY, "network")
+        };
+        crate::observability::upstream_failure(category, kind);
+        Self::Upstream { status }
+    }
+
+    pub(crate) fn bad_gateway(category: &'static str, kind: &'static str) -> Self {
+        crate::observability::upstream_failure(category, kind);
+        Self::Upstream {
+            status: StatusCode::BAD_GATEWAY,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn status(&self) -> StatusCode {
+        match self {
+            Self::Status { status, .. } | Self::Upstream { status } => *status,
+            Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
 }
 
 impl IntoResponse for ServiceError {
@@ -32,6 +60,14 @@ impl IntoResponse for ServiceError {
         match self {
             ServiceError::Status { status, text } => {
                 let mut response = Response::new(Body::from(text));
+                *response.status_mut() = status;
+                response
+                    .headers_mut()
+                    .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+                response
+            }
+            ServiceError::Upstream { status } => {
+                let mut response = Response::new(Body::from("upstream service unavailable"));
                 *response.status_mut() = status;
                 response
                     .headers_mut()

@@ -17,6 +17,7 @@ pub use config::ExtensionProxyConfig;
 #[derive(Clone)]
 pub struct ExtensionProxyService {
     client: Client,
+    download_client: Client,
     config: Arc<ExtensionProxyConfig>,
     omaha: omaha::OmahaState,
 }
@@ -24,7 +25,10 @@ pub struct ExtensionProxyService {
 impl ExtensionProxyService {
     pub fn new(config: Arc<ExtensionProxyConfig>) -> Self {
         Self {
-            client: Client::new(),
+            client: crate::upstream::metadata_client()
+                .expect("metadata HTTP client configuration must be valid"),
+            download_client: crate::upstream::download_client()
+                .expect("download HTTP client configuration must be valid"),
             config,
             omaha: omaha::OmahaState::default(),
         }

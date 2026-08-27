@@ -8,7 +8,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use axum::http::StatusCode;
 use bytes::Bytes;
 use futures_util::{
     FutureExt,
@@ -34,7 +33,7 @@ pub(crate) struct CacheOptions {
     pub(crate) expiry: Option<Duration>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct CachedItem {
     pub(crate) body: Bytes,
     pub(crate) content_type: Arc<str>,
@@ -47,14 +46,10 @@ enum CacheEntry {
         item: CachedItem,
         expiry: Option<Instant>,
     },
-    Negative {
-        expiry: Instant,
-    },
 }
 
 pub(crate) struct CacheStats {
     pub(crate) count: usize,
-    pub(crate) negative: usize,
     pub(crate) size: usize,
 }
 
@@ -69,7 +64,7 @@ impl Cache {
         F: FnOnce() -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<String, ServiceError>> + Send + 'static,
     {
-        if let Some(item) = self.cached(&key).await? {
+        if let Some(item) = self.cached(&key).await {
             self.hits.fetch_add(1, Ordering::Relaxed);
             return Ok(item);
         }
@@ -84,19 +79,15 @@ impl Cache {
                 let cache = self.clone();
                 let future_key = key.clone();
                 let future = async move {
-                    let result = match source().await {
-                        Ok(value) => {
-                            let item = build_cached_item(value, &options).await?;
-                            cache
-                                .store_positive(future_key.clone(), item.clone(), options.expiry)
-                                .await;
-                            Ok(item)
-                        }
-                        Err(err) => {
-                            cache.store_negative(future_key.clone()).await;
-                            Err(err)
-                        }
-                    };
+                    let result = async {
+                        let value = source().await?;
+                        let item = build_cached_item(value, &options).await?;
+                        cache
+                            .store_positive(future_key.clone(), item.clone(), options.expiry)
+                            .await;
+                        Ok(item)
+                    }
+                    .await;
                     cache.inflight.lock().await.remove(&future_key);
                     result
                 }
@@ -129,46 +120,31 @@ impl Cache {
 
     pub(crate) async fn stats(&self) -> CacheStats {
         let entries = self.entries.lock().await;
-        let mut negative = 0;
         let mut size = 0;
         for entry in entries.values() {
-            match entry {
-                CacheEntry::Positive { item, .. } => size += item.body.len(),
-                CacheEntry::Negative { .. } => negative += 1,
-            }
+            let CacheEntry::Positive { item, .. } = entry;
+            size += item.body.len();
         }
 
         CacheStats {
             count: entries.len(),
-            negative,
             size,
         }
     }
 
-    async fn cached(&self, key: &str) -> Result<Option<CachedItem>, ServiceError> {
+    async fn cached(&self, key: &str) -> Option<CachedItem> {
         let now = Instant::now();
         let mut entries = self.entries.lock().await;
         match entries.get(key).cloned() {
             Some(CacheEntry::Positive { item, expiry }) => {
                 if expiry.is_none_or(|expiry| expiry > now) {
-                    Ok(Some(item))
+                    Some(item)
                 } else {
                     entries.remove(key);
-                    Ok(None)
+                    None
                 }
             }
-            Some(CacheEntry::Negative { expiry }) => {
-                if expiry > now {
-                    Err(ServiceError::with_status(
-                        StatusCode::NOT_FOUND,
-                        "Not Found",
-                    ))
-                } else {
-                    entries.remove(key);
-                    Ok(None)
-                }
-            }
-            None => Ok(None),
+            None => None,
         }
     }
 
@@ -182,20 +158,11 @@ impl Cache {
         );
     }
 
-    async fn store_negative(&self, key: String) {
-        self.entries.lock().await.insert(
-            key,
-            CacheEntry::Negative {
-                expiry: Instant::now() + Duration::from_secs(30),
-            },
-        );
-    }
-
     async fn cleanup_expired(&self) {
         let now = Instant::now();
-        self.entries.lock().await.retain(|_, entry| match entry {
-            CacheEntry::Positive { expiry, .. } => expiry.is_none_or(|expiry| expiry > now),
-            CacheEntry::Negative { expiry } => *expiry > now,
+        self.entries.lock().await.retain(|_, entry| {
+            let CacheEntry::Positive { expiry, .. } = entry;
+            expiry.is_none_or(|expiry| expiry > now)
         });
     }
 }
@@ -225,4 +192,70 @@ fn brotli_compress_text(value: &str) -> Result<Vec<u8>, ServiceError> {
             .map_err(ServiceError::internal)?;
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use super::*;
+
+    fn options() -> CacheOptions {
+        CacheOptions {
+            content_type: "text/plain".to_string(),
+            expiry: Some(Duration::from_secs(60)),
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_valid_misses_are_coalesced() {
+        let cache = Cache::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..20 {
+            let cache = cache.clone();
+            let calls = Arc::clone(&calls);
+            tasks.push(tokio::spawn(async move {
+                cache
+                    .materialize("key".to_string(), options(), move || async move {
+                        calls.fetch_add(1, Ordering::Relaxed);
+                        time::sleep(Duration::from_millis(20)).await;
+                        Ok("value".to_string())
+                    })
+                    .await
+            }));
+        }
+
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn source_errors_are_never_cached() {
+        let cache = Cache::default();
+        let calls = Arc::new(AtomicUsize::new(0));
+        for _ in 0..2 {
+            let calls = Arc::clone(&calls);
+            let result = cache
+                .materialize("key".to_string(), options(), move || async move {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    Err(ServiceError::Upstream {
+                        status: axum::http::StatusCode::BAD_GATEWAY,
+                    })
+                })
+                .await;
+            let Err(error) = result else {
+                panic!("source error was unexpectedly cached as a success");
+            };
+            assert_eq!(error.status(), axum::http::StatusCode::BAD_GATEWAY);
+        }
+
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(cache.stats().await.count, 0);
+    }
 }

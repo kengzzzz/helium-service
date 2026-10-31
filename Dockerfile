@@ -1,6 +1,6 @@
-ARG RUST_ALPINE_DIGEST=sha256:a41f7740f8b45d45795624eec13a8b42263cc700f19f7e4e86e04d3dda08a479
+ARG RUST_ALPINE_DIGEST=sha256:7e9e2d068a107a2adafd19930011178d14a78326053cd4c3a9f7ad3fd049557d
 
-FROM --platform=$TARGETPLATFORM rust:1.96-alpine@${RUST_ALPINE_DIGEST} AS builder
+FROM --platform=$TARGETPLATFORM rust:1.99.1-alpine@${RUST_ALPINE_DIGEST} AS builder
 
 RUN apk add --no-cache ca-certificates binutils musl-dev
 

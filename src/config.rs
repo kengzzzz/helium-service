@@ -4,12 +4,12 @@ use url::Url;
 
 use crate::error::ServiceError;
 
-pub(crate) const VERSION_HELIUM: &str = "1.74.0";
-pub(crate) const VERSION_VANILLA: &str = "1.73.0";
+pub(crate) const VERSION_HELIUM: &str = "1.75.0";
+pub(crate) const VERSION_VANILLA: &str = "1.74.0";
 pub(crate) const CSUM_HELIUM: &str =
     "94d3de3dfccfe953be535961e4108773c5f5797291d69de07f8f1f831a361656";
 pub(crate) const CSUM_VANILLA: &str =
-    "fff077d6a1f5522170fa343008e18a4e41228fae8dd5abe5796191f7f3400b17";
+    "61488d15d26dfb7a8c73e8e2692ebf636300eb4fb6b98bc8356e317631487996";
 const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8000";
 const DEFAULT_HEALTHCHECK_URL: &str = "http://127.0.0.1:8000/readyz";
 
